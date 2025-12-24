@@ -1,5 +1,6 @@
 Flask
-flask-login
+Flask-Login
+Werkzeug
 twilio
-gunicorn
 openai
+gunicorn

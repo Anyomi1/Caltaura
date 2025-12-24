@@ -1,809 +1,548 @@
-from flask import Flask, request, redirect, url_for, render_template, render_template_string
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+import os
 import sqlite3
 from datetime import datetime, timezone
-import json
-import hashlib
 
+from flask import (
+    Flask, request, redirect, url_for,
+    render_template, render_template_string, flash
+)
+from flask_login import (
+    LoginManager, UserMixin, login_user,
+    login_required, logout_user, current_user
+)
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from twilio.twiml.voice_response import VoiceResponse, Gather
 
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+try:
+    from jinja2 import TemplateNotFound
+except Exception:
+    TemplateNotFound = Exception
+
+
+# =========================================================
+# App setup
+# =========================================================
 app = Flask(__name__)
-app.secret_key = "dev-secret-key"  # replace later
-DB_PATH = "database.db"
+app.secret_key = os.getenv("SECRET_KEY", "dev-secret-key-change-me")
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
 
+DB_PATH = os.getenv("DB_PATH", "database.db")
 
-# -----------------------------
-# Utilities
-# -----------------------------
-def now_utc_iso():
-    return datetime.now(timezone.utc).isoformat()
+openai_client = None
+if OpenAI is not None and os.getenv("OPENAI_API_KEY"):
+    openai_client = OpenAI()  # reads OPENAI_API_KEY from env
 
-def hash_pw(pw: str) -> str:
-    # MVP hashing. Upgrade to werkzeug security later.
-    return hashlib.sha256((pw or "").encode("utf-8")).hexdigest()
 
+# =========================================================
+# DB helpers + migrations
+# =========================================================
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
+
+def table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,)
+    ).fetchone()
+    return row is not None
+
+
+def table_columns(conn, table_name: str) -> set:
+    if not table_exists(conn, table_name):
+        return set()
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {r["name"] for r in rows}
+
+
+def ensure_column(conn, table: str, col: str, col_type: str):
+    cols = table_columns(conn, table)
+    if col not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+
+
+def try_create_unique_index(conn, index_name: str, table: str, col: str):
+    try:
+        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table}({col})")
+    except Exception:
+        pass
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
 def init_db():
     conn = get_db()
     cur = conn.cursor()
 
-    # Users (SaaS accounts)
+    # USERS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    # Biz settings per user
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS biz_settings (
-            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            password_hash TEXT,
+            password TEXT,
             business_name TEXT,
-            twilio_number TEXT UNIQUE,       -- the Twilio number callers dial (E.164 preferred)
+            phone TEXT,
             greeting TEXT,
-            hours_text TEXT,
-            services_text TEXT,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+            faqs TEXT,
+            created_at_utc TEXT
         )
     """)
 
-    # Call logs per user
+    # Ensure columns exist even if DB was created with a different schema
+    ensure_column(conn, "users", "username", "TEXT")
+    ensure_column(conn, "users", "password_hash", "TEXT")
+    ensure_column(conn, "users", "password", "TEXT")  # legacy fallback
+    ensure_column(conn, "users", "business_name", "TEXT")
+    ensure_column(conn, "users", "phone", "TEXT")
+    ensure_column(conn, "users", "greeting", "TEXT")
+    ensure_column(conn, "users", "faqs", "TEXT")
+    ensure_column(conn, "users", "created_at_utc", "TEXT")
+    try_create_unique_index(conn, "idx_users_username_unique", "users", "username")
+
+    # CALL LOGS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS call_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
             call_sid TEXT,
             from_number TEXT,
             to_number TEXT,
-            created_at TEXT,
-            intent TEXT,
-            stage TEXT,
-            transcript TEXT,
-            bot_reply TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+            ts_utc TEXT,
+            speech TEXT,
+            reply TEXT
         )
     """)
-
-    # Call state per call (for follow-ups)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS call_state (
-            call_sid TEXT PRIMARY KEY,
-            user_id INTEGER,
-            intent TEXT,
-            stage TEXT,
-            data_json TEXT,
-            updated_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    """)
-
-    # Messages captured
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            call_sid TEXT,
-            from_number TEXT,
-            created_at TEXT,
-            name TEXT,
-            phone TEXT,
-            message TEXT,
-            intent TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    """)
+    ensure_column(conn, "call_logs", "call_sid", "TEXT")
+    ensure_column(conn, "call_logs", "from_number", "TEXT")
+    ensure_column(conn, "call_logs", "to_number", "TEXT")
+    ensure_column(conn, "call_logs", "ts_utc", "TEXT")
+    ensure_column(conn, "call_logs", "speech", "TEXT")
+    ensure_column(conn, "call_logs", "reply", "TEXT")
 
     conn.commit()
     conn.close()
 
 
-# -----------------------------
+# =========================================================
 # Auth
-# -----------------------------
+# =========================================================
 class User(UserMixin):
-    def __init__(self, user_id, email):
+    def __init__(self, user_id, username):
         self.id = user_id
-        self.email = email
+        self.username = username
+
 
 @login_manager.user_loader
 def load_user(user_id):
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    row = conn.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
     conn.close()
     if row:
-        return User(row["id"], row["email"])
+        return User(row["id"], row["username"] or "")
     return None
 
 
-# -----------------------------
-# SaaS: settings + routing
-# -----------------------------
-def get_settings_by_user(user_id: int):
-    conn = get_db()
-    row = conn.execute("SELECT * FROM biz_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row
-
-def get_user_by_twilio_to_number(to_number: str):
-    """
-    Map inbound calls to the correct business using the called Twilio number (To).
-    """
-    if not to_number:
-        return None, None
-
-    conn = get_db()
-    s = conn.execute(
-        "SELECT * FROM biz_settings WHERE twilio_number = ?",
-        (to_number.strip(),)
-    ).fetchone()
-
-    if not s:
-        conn.close()
-        return None, None
-
-    u = conn.execute("SELECT * FROM users WHERE id = ?", (s["user_id"],)).fetchone()
-    conn.close()
-    return u, s
-
-def ensure_settings(user_id: int):
-    """
-    Ensure there's a settings row for this user.
-    """
-    existing = get_settings_by_user(user_id)
-    if existing:
-        return
-
-    conn = get_db()
-    conn.execute("""
-        INSERT INTO biz_settings (user_id, business_name, twilio_number, greeting, hours_text, services_text, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        user_id,
-        "My Business",
-        None,
-        "Hello, thanks for calling. How can I help you today?",
-        "Mon–Fri 9am–6pm",
-        "General services",
-        now_utc_iso()
-    ))
-    conn.commit()
-    conn.close()
+def verify_password(row, password: str) -> bool:
+    # New system (hashed)
+    if row.get("password_hash"):
+        try:
+            return check_password_hash(row["password_hash"], password)
+        except Exception:
+            return False
+    # Legacy fallback (plaintext)
+    if row.get("password"):
+        return row["password"] == password
+    return False
 
 
-# -----------------------------
-# Call logic (rule-based + one follow-up max)
-# -----------------------------
-def detect_intent(text: str) -> str:
-    t = (text or "").strip().lower()
+# =========================================================
+# AI receptionist
+# =========================================================
+def ai_receptionist_reply(business_name: str, greeting: str, faqs: str, caller_text: str) -> str:
+    business_name = (business_name or "the business").strip()
+    greeting = (greeting or f"Thanks for calling {business_name}. How can I help?").strip()
+    faqs = (faqs or "").strip()
+    caller_text = (caller_text or "").strip()
 
-    if any(k in t for k in ["appointment", "book", "booking", "schedule", "reserve"]):
-        return "appointment"
-    if any(k in t for k in ["hours", "open", "opening", "closing", "close", "what time"]):
-        return "hours"
-    if any(k in t for k in ["price", "pricing", "cost", "how much", "rate", "fees"]):
-        return "pricing"
-    if any(k in t for k in ["human", "agent", "representative", "operator", "call me back", "callback", "speak to", "message"]):
-        return "message"
+    if openai_client is None:
+        return "Thanks. Can I get your name and what you’re calling about?"
 
-    return "general"
+    instructions = f"""
+You are BizBot, the receptionist for {business_name}.
+Your output will be spoken on a phone call.
+Rules:
+- Be professional and concise (max 2 sentences).
+- Use the FAQ if it contains the answer.
+- If unsure, ask ONE clarifying question OR take a message.
+- If caller wants to book, ask for name + preferred day/time.
+- Never invent hours, location, pricing, or services not in the FAQ.
+"""
 
-def get_state(call_sid: str):
-    conn = get_db()
-    row = conn.execute("SELECT * FROM call_state WHERE call_sid = ?", (call_sid,)).fetchone()
-    conn.close()
-    if not row:
-        return {"user_id": None, "intent": None, "stage": "root", "data": {}}
+    user_input = f"""
+Greeting used: {greeting}
+
+Business FAQ:
+{faqs}
+
+Caller said: {caller_text}
+
+Write the next receptionist line (max 2 sentences).
+"""
+
     try:
-        data = json.loads(row["data_json"] or "{}")
+        resp = openai_client.responses.create(
+            model="gpt-4.1-mini",
+            input=[
+                {"role": "developer", "content": instructions},
+                {"role": "user", "content": user_input},
+            ],
+        )
+        text = (resp.output_text or "").strip()
+        return text or "Sorry, I didn’t catch that. What’s your name and what are you calling about?"
     except Exception:
-        data = {}
-    return {"user_id": row["user_id"], "intent": row["intent"], "stage": row["stage"] or "root", "data": data}
+        return "Sorry—there was a problem on our side. Please leave your name and what you’re calling about."
 
-def set_state(call_sid: str, user_id: int, intent: str, stage: str, data: dict):
+
+def get_default_business_config():
     """
-    MVP-safe upsert that works regardless of prior schema drift:
-    delete then insert.
+    MVP: uses the FIRST user in the DB as the “business”.
+    Later: map To-number -> correct user/business.
     """
     conn = get_db()
-    conn.execute("DELETE FROM call_state WHERE call_sid = ?", (call_sid,))
-    conn.execute("""
-        INSERT INTO call_state (call_sid, user_id, intent, stage, data_json, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (call_sid, user_id, intent, stage, json.dumps(data or {}), now_utc_iso()))
-    conn.commit()
+    row = conn.execute("""
+        SELECT business_name, greeting, faqs
+        FROM users
+        ORDER BY id ASC
+        LIMIT 1
+    """).fetchone()
     conn.close()
 
-def clear_state(call_sid: str):
-    conn = get_db()
-    conn.execute("DELETE FROM call_state WHERE call_sid = ?", (call_sid,))
-    conn.commit()
-    conn.close()
-
-def log_call(user_id, call_sid, from_number, to_number, intent, stage, transcript, bot_reply):
-    conn = get_db()
-    conn.execute("""
-        INSERT INTO call_logs (user_id, call_sid, from_number, to_number, created_at, intent, stage, transcript, bot_reply)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, call_sid, from_number, to_number, now_utc_iso(), intent, stage, transcript, bot_reply))
-    conn.commit()
-    conn.close()
-
-def make_gather(prompt: str, action_url="/handle-input"):
-    vr = VoiceResponse()
-    g = Gather(
-        input="speech",
-        action=action_url,
-        method="POST",
-        timeout=4,
-        speech_timeout="auto"
-    )
-    g.say(prompt, voice="alice")
-    vr.append(g)
-    vr.say("I did not hear anything. Goodbye.", voice="alice")
-    return vr
+    if row:
+        return (
+            (row["business_name"] or "Caltora"),
+            (row["greeting"] or "Thanks for calling. How can I help?"),
+            (row["faqs"] or "")
+        )
+    return ("Caltora", "Thanks for calling. How can I help?", "")
 
 
-# -----------------------------
-# Web UI (SaaS)
-# -----------------------------
-@app.route("/", methods=["GET"])
+def log_call(call_sid: str, from_number: str, to_number: str, speech: str, reply: str):
+    try:
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO call_logs (call_sid, from_number, to_number, ts_utc, speech, reply)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (call_sid, from_number, to_number, utc_now_iso(), speech, reply))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+# =========================================================
+# Web UI
+# =========================================================
+@app.route("/")
 def home():
-    return render_template("landing.html")
+    try:
+        return render_template("landing.html")
+    except TemplateNotFound:
+        return render_template_string("""
+        <h1>Caltora</h1>
+        <p>AI receptionist for small businesses.</p>
+        <p><a href="/register">Register</a> | <a href="/login">Login</a></p>
+        """)
+
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
+
+@app.route("/privacy")
+def privacy():
+    return render_template("privacy.html")
+
+
+@app.route("/terms")
+def terms():
+    return render_template("terms.html")
+
+
+@app.route("/disclaimer")
+def disclaimer():
+    return render_template("disclaimer.html")
 
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
-        email = (request.form.get("email") or "").strip().lower()
-        pw = request.form.get("password") or ""
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        business_name = (request.form.get("business_name") or "").strip()
+        phone = (request.form.get("phone") or "").strip()
+        greeting = (request.form.get("greeting") or "").strip()
+        faqs = (request.form.get("faqs") or "").strip()
 
-        if not email or not pw:
-            return "Email and password required", 400
+        if not username or not password:
+            return "Username and password are required.", 400
+
+        pw_hash = generate_password_hash(password)
 
         conn = get_db()
         try:
-            conn.execute(
-                "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-                (email, hash_pw(pw), now_utc_iso())
-            )
+            conn.execute("""
+                INSERT INTO users (username, password_hash, business_name, phone, greeting, faqs, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (username, pw_hash, business_name, phone, greeting, faqs, utc_now_iso()))
             conn.commit()
         except sqlite3.IntegrityError:
             conn.close()
-            return "That email is already registered.", 400
-
-        row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            return "That username is already taken. Try another.", 400
+        except Exception as e:
+            conn.close()
+            return f"Registration error: {e}", 500
         conn.close()
 
-        user = User(row["id"], row["email"])
-        login_user(user)
-        ensure_settings(user.id)
-        return redirect(url_for("settings"))
+        return redirect(url_for("login"))
 
     return render_template_string("""
-        <h2>Register</h2>
-        <form method="post">
-          Email: <input name="email" type="email" /><br/>
-          Password: <input name="password" type="password" /><br/>
-          <button type="submit">Create Account</button>
-        </form>
-        <p><a href="/login">Login</a></p>
+    <h2>Register</h2>
+    <form method="post">
+      <label>Username</label><br><input name="username"><br><br>
+      <label>Password</label><br><input name="password" type="password"><br><br>
+
+      <label>Business Name (optional)</label><br><input name="business_name"><br><br>
+      <label>Your Phone (optional)</label><br><input name="phone" placeholder="+966..."><br><br>
+      <label>Greeting (optional)</label><br><input name="greeting" placeholder="Thanks for calling..."><br><br>
+
+      <label>FAQs (optional)</label><br>
+      <textarea name="faqs" rows="6" cols="60" placeholder="Hours, location, services, pricing..."></textarea><br><br>
+
+      <button type="submit">Create Account</button>
+    </form>
+    <p><a href="/login">Already have an account? Login</a></p>
     """)
+
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        email = (request.form.get("email") or "").strip().lower()
-        pw = request.form.get("password") or ""
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
 
         conn = get_db()
-        row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         conn.close()
 
-        if not row or row["password_hash"] != hash_pw(pw):
-            return "Invalid credentials", 401
+        if row and verify_password(row, password):
+            login_user(User(row["id"], row["username"] or ""))
+            return redirect(url_for("dashboard"))
 
-        login_user(User(row["id"], row["email"]))
-        ensure_settings(row["id"])
-        return redirect(url_for("dashboard"))
+        return "Invalid credentials", 401
 
     return render_template_string("""
-        <h2>Login</h2>
-        <form method="post">
-          Email: <input name="email" type="email" /><br/>
-          Password: <input name="password" type="password" /><br/>
-          <button type="submit">Login</button>
-        </form>
-        <p><a href="/register">Register</a></p>
+    <h2>Login</h2>
+    <form method="post">
+      <label>Username</label><br><input name="username"><br><br>
+      <label>Password</label><br><input name="password" type="password"><br><br>
+      <button type="submit">Login</button>
+    </form>
+    <p><a href="/register">Create an account</a></p>
     """)
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    conn = get_db()
+    user_row = conn.execute("""
+        SELECT business_name, phone, greeting, faqs
+        FROM users WHERE id = ?
+    """, (current_user.id,)).fetchone()
+
+    logs = conn.execute("""
+        SELECT ts_utc, from_number, speech, reply
+        FROM call_logs
+        ORDER BY id DESC
+        LIMIT 25
+    """).fetchall()
+    conn.close()
+
+    business_name = user_row["business_name"] if user_row else ""
+    phone = user_row["phone"] if user_row else ""
+    greeting = user_row["greeting"] if user_row else ""
+    faqs = user_row["faqs"] if user_row else ""
+
+    return render_template_string("""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8"/>
+      <meta name="viewport" content="width=device-width, initial-scale=1"/>
+      <title>BizBot Dashboard</title>
+    </head>
+    <body style="font-family:Arial, sans-serif; max-width: 960px; margin: 0 auto; padding: 30px;">
+      <h2>Dashboard</h2>
+      <p>Logged in as <b>{{ username }}</b> | <a href="/logout">Logout</a></p>
+
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <div style="padding:10px;border:1px solid #cfc;border-radius:6px;margin:10px 0;">
+            {{ messages[0] }}
+          </div>
+        {% endif %}
+      {% endwith %}
+
+      <h3>Your BizBot Settings</h3>
+      <form method="post" action="/update-settings">
+        <label>Business Name</label><br>
+        <input name="business_name" value="{{ business_name }}" style="width:100%; padding:10px;"><br><br>
+
+        <label>Your Phone</label><br>
+        <input name="phone" value="{{ phone }}" style="width:100%; padding:10px;"><br><br>
+
+        <label>Greeting</label><br>
+        <input name="greeting" value="{{ greeting }}" style="width:100%; padding:10px;"><br><br>
+
+        <label>FAQs</label><br>
+        <textarea name="faqs" rows="7" style="width:100%; padding:10px;">{{ faqs }}</textarea><br><br>
+
+        <button type="submit" style="padding:12px 18px;">Save</button>
+      </form>
+
+      <h3 style="margin-top:30px;">Recent Calls</h3>
+      {% if logs and logs|length > 0 %}
+        {% for r in logs %}
+          <div style="padding:10px;border:1px solid #ddd;border-radius:6px;margin:10px 0;">
+            <div><b>Time:</b> {{ r.ts_utc }}</div>
+            <div><b>From:</b> {{ r.from_number }}</div>
+            <div><b>Caller:</b> {{ r.speech }}</div>
+            <div><b>BizBot:</b> {{ r.reply }}</div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p>No calls logged yet.</p>
+      {% endif %}
+    </body>
+    </html>
+    """, username=current_user.username, business_name=business_name or "", phone=phone or "",
+       greeting=greeting or "", faqs=faqs or "", logs=logs)
+
+
+@app.route("/update-settings", methods=["POST"])
+@login_required
+def update_settings():
+    business_name = (request.form.get("business_name") or "").strip()
+    phone = (request.form.get("phone") or "").strip()
+    greeting = (request.form.get("greeting") or "").strip()
+    faqs = (request.form.get("faqs") or "").strip()
+
+    conn = get_db()
+    conn.execute("""
+        UPDATE users
+        SET business_name=?, phone=?, greeting=?, faqs=?
+        WHERE id=?
+    """, (business_name, phone, greeting, faqs, current_user.id))
+    conn.commit()
+    conn.close()
+
+    flash("Settings saved.")
+    return redirect(url_for("dashboard"))
+
 
 @app.route("/logout")
 @login_required
 def logout():
     logout_user()
-    return redirect(url_for("home"))
-
-@app.route("/settings", methods=["GET", "POST"])
-@login_required
-def settings():
-    ensure_settings(current_user.id)
-
-    if request.method == "POST":
-        business_name = (request.form.get("business_name") or "").strip()
-        twilio_number = (request.form.get("twilio_number") or "").strip() or None
-        greeting = (request.form.get("greeting") or "").strip()
-        hours_text = (request.form.get("hours_text") or "").strip()
-        services_text = (request.form.get("services_text") or "").strip()
-
-        conn = get_db()
-        try:
-            conn.execute("""
-                UPDATE biz_settings
-                SET business_name=?, twilio_number=?, greeting=?, hours_text=?, services_text=?, updated_at=?
-                WHERE user_id=?
-            """, (business_name, twilio_number, greeting, hours_text, services_text, now_utc_iso(), current_user.id))
-            conn.commit()
-        except sqlite3.IntegrityError:
-            conn.close()
-            return "That Twilio number is already assigned to another account.", 400
-        conn.close()
-
-        return redirect(url_for("settings"))
-
-    s = get_settings_by_user(current_user.id)
-
-    return render_template_string("""
-        <h2>Settings</h2>
-        <p><a href="/dashboard">Dashboard</a> | <a href="/logout">Logout</a></p>
-
-        <form method="post">
-          Business Name:<br/>
-          <input name="business_name" value="{{s['business_name'] or ''}}" style="width:420px"/><br/><br/>
-
-          Your Twilio Number (the number callers dial):<br/>
-          <input name="twilio_number" value="{{s['twilio_number'] or ''}}" style="width:420px" placeholder="+1XXXXXXXXXX"/><br/>
-          <small>Use the exact E.164 format shown in Twilio (recommended).</small><br/><br/>
-
-          Greeting:<br/>
-          <input name="greeting" value="{{s['greeting'] or ''}}" style="width:420px"/><br/><br/>
-
-          Hours (plain text):<br/>
-          <textarea name="hours_text" rows="3" cols="70">{{s['hours_text'] or ''}}</textarea><br/><br/>
-
-          Services (plain text):<br/>
-          <textarea name="services_text" rows="4" cols="70">{{s['services_text'] or ''}}</textarea><br/><br/>
-
-          <button type="submit">Save Settings</button>
-        </form>
-    """, s=s)
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    ensure_settings(current_user.id)
-    s = get_settings_by_user(current_user.id)
-
-    conn = get_db()
-    calls = conn.execute("""
-        SELECT created_at, from_number, to_number, intent, stage, transcript, bot_reply
-        FROM call_logs
-        WHERE user_id = ?
-        ORDER BY id DESC
-        LIMIT 20
-    """, (current_user.id,)).fetchall()
-
-    msgs = conn.execute("""
-        SELECT created_at, name, phone, message, intent, from_number
-        FROM messages
-        WHERE user_id = ?
-        ORDER BY id DESC
-        LIMIT 20
-    """, (current_user.id,)).fetchall()
-    conn.close()
-
-    def row_escape(x):
-        return (x or "").replace("<", "&lt;").replace(">", "&gt;")
-
-    calls_rows = "".join([
-        f"<tr><td>{row_escape(r['created_at'])}</td><td>{row_escape(r['from_number'])}</td><td>{row_escape(r['intent'])}</td><td>{row_escape(r['transcript'])}</td><td>{row_escape(r['bot_reply'])}</td></tr>"
-        for r in calls
-    ]) or "<tr><td colspan='5'>No calls logged yet.</td></tr>"
-
-    msgs_rows = "".join([
-        f"<tr><td>{row_escape(r['created_at'])}</td><td>{row_escape(r['name'])}</td><td>{row_escape(r['phone'])}</td><td>{row_escape(r['intent'])}</td><td>{row_escape(r['message'])}</td></tr>"
-        for r in msgs
-    ]) or "<tr><td colspan='5'>No messages captured yet.</td></tr>"
-
-    return render_template_string("""
-        <h2>Dashboard — {{s['business_name']}}</h2>
-        <p>
-          <a href="/settings">Settings</a> |
-          <a href="/logout">Logout</a>
-        </p>
-
-        <h3>Recent Calls</h3>
-        <table border="1" cellpadding="6">
-          <tr><th>Time (UTC)</th><th>From</th><th>Intent</th><th>Transcript</th><th>Bot Reply</th></tr>
-          {{calls_rows | safe}}
-        </table>
-
-        <h3>Messages</h3>
-        <table border="1" cellpadding="6">
-          <tr><th>Time (UTC)</th><th>Name</th><th>Phone</th><th>Intent</th><th>Message</th></tr>
-          {{msgs_rows | safe}}
-        </table>
-
-        <hr/>
-        <p><b>Twilio Number on File:</b> {{s['twilio_number'] or 'Not set (go to Settings)'}} </p>
-    """, s=s, calls_rows=calls_rows, msgs_rows=msgs_rows)
+    return redirect(url_for("login"))
 
 
-# -----------------------------
-# Twilio inbound
-# -----------------------------
+# =========================================================
+# Twilio Voice Webhooks (kept for later)
+# =========================================================
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
-    to_number = (request.form.get("To") or "").strip()
-    u, s = get_user_by_twilio_to_number(to_number)
-
-    # If not mapped yet, still respond safely
-    business_name = s["business_name"] if s else "this business"
-    greeting = s["greeting"] if s and s["greeting"] else "Hello. Thanks for calling. How can I help you today?"
+    business_name, greeting, _faqs = get_default_business_config()
 
     vr = VoiceResponse()
-    vr.say("Notice: This call may be recorded for quality and training purposes.", voice="alice")
-    vr.say(f"Welcome to {business_name}.", voice="alice")
-    vr.say(greeting, voice="alice")
+    vr.say(greeting or f"Thanks for calling {business_name}. How can I help?")
 
-    g = Gather(input="speech", action="/handle-input", method="POST", timeout=4, speech_timeout="auto")
-    g.say("You can say appointments, hours, pricing, or leave a message.", voice="alice")
-    vr.append(g)
-    vr.say("I did not hear anything. Goodbye.", voice="alice")
+    gather = Gather(
+        input="speech",
+        action="/handle-input",
+        method="POST",
+        speechTimeout="auto",
+        timeout=6
+    )
+    gather.say("Please tell me what you need.")
+    vr.append(gather)
+
+    vr.say("Sorry, I didn’t catch that. Please call back or try again.")
     return str(vr)
+
 
 @app.route("/handle-input", methods=["POST"])
 def handle_input():
-    speech = (request.form.get("SpeechResult") or "").strip()
-    call_sid = (request.form.get("CallSid") or "").strip()
-    from_number = (request.form.get("From") or "").strip()
-    to_number = (request.form.get("To") or "").strip()
+    call_sid = request.values.get("CallSid", "")
+    from_number = request.values.get("From", "")
+    to_number = request.values.get("To", "")
+    speech = (request.values.get("SpeechResult") or "").strip()
 
-    print("DEBUG /handle-input To:", to_number)
-    print("DEBUG /handle-input SpeechResult:", speech)
+    business_name, greeting, faqs = get_default_business_config()
 
+    vr = VoiceResponse()
 
-    # Determine which user this call belongs to
-    u, s = get_user_by_twilio_to_number(to_number)
-    user_id = u["id"] if u else None
-
-    # If unmapped, do a minimal message capture path
-    if not user_id:
-        vr = VoiceResponse()
-        vr.say("Thanks. This number is not yet linked to an account. Please call back later.", voice="alice")
-        return str(vr)
-
-    state = get_state(call_sid)
-    stage = state["stage"]
-    intent = state["intent"]
-    data = state["data"] or {}
-
-    # Silence handling
     if not speech:
-        if stage == "root":
-            reply = "I did not catch that. Please repeat."
-            log_call(user_id, call_sid, from_number, to_number, intent, stage, speech, reply)
-            return str(make_gather(reply))
-        reply = "I still did not catch that. Goodbye."
-        log_call(user_id, call_sid, from_number, to_number, intent, stage, speech, reply)
-        clear_state(call_sid)
-        vr = VoiceResponse()
-        vr.say(reply, voice="alice")
+        vr.say("Sorry, I didn’t catch that. Please say that again.")
+        gather = Gather(
+            input="speech",
+            action="/handle-input",
+            method="POST",
+            speechTimeout="auto",
+            timeout=6
+        )
+        gather.say("Go ahead.")
+        vr.append(gather)
+        vr.say("Thanks for calling. Goodbye.")
         return str(vr)
 
-    # Root routing
-    if stage == "root":
-        intent = detect_intent(speech)
-        data = {"first_utterance": speech}
+    reply = ai_receptionist_reply(business_name, greeting, faqs, speech)
+    log_call(call_sid, from_number, to_number, speech, reply)
 
-        if intent == "hours":
-            reply = "Which location are you asking about?"
-            set_state(call_sid, user_id, intent, "hours_location", data)
-            log_call(user_id, call_sid, from_number, to_number, intent, "root", speech, reply)
-            return str(make_gather(reply))
+    vr.say(reply)
 
-        if intent == "pricing":
-            reply = "Which service are you asking about?"
-            set_state(call_sid, user_id, intent, "pricing_service", data)
-            log_call(user_id, call_sid, from_number, to_number, intent, "root", speech, reply)
-            return str(make_gather(reply))
+    gather = Gather(
+        input="speech",
+        action="/handle-input",
+        method="POST",
+        speechTimeout="auto",
+        timeout=6
+    )
+    gather.say("Anything else?")
+    vr.append(gather)
 
-        if intent == "appointment":
-            reply = "What day and time would you like the appointment?"
-            set_state(call_sid, user_id, intent, "appt_datetime", data)
-            log_call(user_id, call_sid, from_number, to_number, intent, "root", speech, reply)
-            return str(make_gather(reply))
-
-        # message or general -> message capture
-        reply = "Sure. Please tell me your name."
-        set_state(call_sid, user_id, "message", "msg_name", data)
-        log_call(user_id, call_sid, from_number, to_number, "message", "root", speech, reply)
-        return str(make_gather(reply))
-
-    # Hours follow-up (one question max -> message capture)
-    if stage == "hours_location":
-        data["location"] = speech
-        reply = "Thanks. Please tell me your name so the team can confirm the hours and follow up."
-        set_state(call_sid, user_id, "message", "msg_name", data)
-        log_call(user_id, call_sid, from_number, to_number, "hours", stage, speech, reply)
-        return str(make_gather(reply))
-
-    # Pricing follow-up (one question max -> message capture)
-    if stage == "pricing_service":
-        data["service"] = speech
-        reply = "Thanks. Please tell me your name so the team can follow up with accurate pricing."
-        set_state(call_sid, user_id, "message", "msg_name", data)
-        log_call(user_id, call_sid, from_number, to_number, "pricing", stage, speech, reply)
-        return str(make_gather(reply))
-
-    # Appointment flow (two-step capture)
-    if stage == "appt_datetime":
-        data["appt_datetime"] = speech
-        reply = "Thanks. Please tell me your name."
-        set_state(call_sid, user_id, "appointment", "appt_name", data)
-        log_call(user_id, call_sid, from_number, to_number, "appointment", stage, speech, reply)
-        return str(make_gather(reply))
-
-    if stage == "appt_name":
-        data["name"] = speech
-        reply = "Please confirm the best callback phone number."
-        set_state(call_sid, user_id, "appointment", "appt_phone", data)
-        log_call(user_id, call_sid, from_number, to_number, "appointment", stage, speech, reply)
-        return str(make_gather(reply))
-
-    if stage == "appt_phone":
-        data["phone"] = speech
-        # Save as message record for MVP
-        conn = get_db()
-        conn.execute("""
-            INSERT INTO messages (user_id, call_sid, from_number, created_at, name, phone, message, intent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            user_id,
-            call_sid,
-            from_number,
-            now_utc_iso(),
-            data.get("name", ""),
-            data.get("phone", ""),
-            f"Appointment request: {data.get('appt_datetime','')} | Caller said: {data.get('first_utterance','')}",
-            "appointment"
-        ))
-        conn.commit()
-        conn.close()
-
-        reply = "Perfect. I have your request. The team will confirm shortly. Goodbye."
-        log_call(user_id, call_sid, from_number, to_number, "appointment", stage, speech, reply)
-        clear_state(call_sid)
-        vr = VoiceResponse()
-        vr.say(reply, voice="alice")
-        return str(vr)
-
-    # Message capture flow
-    if stage == "msg_name":
-        data["name"] = speech
-        reply = "Thanks. What is the best callback phone number?"
-        set_state(call_sid, user_id, "message", "msg_phone", data)
-        log_call(user_id, call_sid, from_number, to_number, "message", stage, speech, reply)
-        return str(make_gather(reply))
-
-    if stage == "msg_phone":
-        data["phone"] = speech
-        reply = "Please say your message."
-        set_state(call_sid, user_id, "message", "msg_body", data)
-        log_call(user_id, call_sid, from_number, to_number, "message", stage, speech, reply)
-        return str(make_gather(reply))
-
-    if stage == "msg_body":
-        data["message"] = speech
-        conn = get_db()
-        conn.execute("""
-            INSERT INTO messages (user_id, call_sid, from_number, created_at, name, phone, message, intent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            user_id,
-            call_sid,
-            from_number,
-            now_utc_iso(),
-            data.get("name", ""),
-            data.get("phone", ""),
-            data.get("message", ""),
-            data.get("intent", "message") if data.get("intent") else "message"
-        ))
-        conn.commit()
-        conn.close()
-
-        reply = "Thank you. Your message has been recorded. Goodbye."
-        log_call(user_id, call_sid, from_number, to_number, "message", stage, speech, reply)
-        clear_state(call_sid)
-        vr = VoiceResponse()
-        vr.say(reply, voice="alice")
-        return str(vr)
-
-    # Fallback reset
-    reply = "Thanks. Let me restart. Please tell me how I can help."
-    log_call(user_id, call_sid, from_number, to_number, intent, stage, speech, reply)
-    clear_state(call_sid)
-    return str(make_gather(reply))
+    vr.say("Thanks for calling. Goodbye.")
+    return str(vr)
 
 
+# =========================================================
+# Main
+# =========================================================
 if __name__ == "__main__":
     init_db()
     app.run(debug=True)
-
-
-LANDING_PAGE_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Caltora — Never Miss Another Business Call</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #ffffff;
-      color: #111;
-      max-width: 900px;
-      margin: 0 auto;
-      padding: 40px 20px;
-      line-height: 1.6;
-    }
-    h1 { font-size: 42px; margin-bottom: 10px; }
-    h2 { margin-top: 40px; }
-    p { font-size: 18px; }
-    ul { font-size: 18px; }
-    .cta {
-      display: inline-block;
-      margin-top: 20px;
-      padding: 14px 24px;
-      background: #000;
-      color: #fff;
-      text-decoration: none;
-      font-size: 18px;
-      border-radius: 6px;
-    }
-    .box {
-      background: #f7f7f7;
-      padding: 20px;
-      border-radius: 8px;
-      margin-top: 20px;
-    }
-    .price {
-      font-size: 28px;
-      font-weight: bold;
-    }
-    footer {
-      margin-top: 60px;
-      font-size: 14px;
-      color: #666;
-    }
-  </style>
-</head>
-<body>
-
-<h1>Never miss another business call.</h1>
-
-<p>
-Caltora is an AI receptionist that answers calls when you're busy and captures messages automatically — so you don’t lose customers.
-</p>
-
-<a class="cta" href="mailto:your@email.com?subject=Caltora%20Setup%20Request">
-Request setup
-</a>
-
-<h2>The problem</h2>
-
-<p>
-You miss calls when you’re:
-</p>
-
-<ul>
-  <li>With another client</li>
-  <li>Driving or unavailable</li>
-  <li>After hours</li>
-  <li>Understaffed</li>
-</ul>
-
-<p>
-Missed calls mean <strong>lost business</strong>.
-</p>
-
-<h2>The solution</h2>
-
-<p>
-<strong>Caltora answers your calls for you.</strong>
-</p>
-
-<ul>
-  <li>Answers calls professionally</li>
-  <li>Asks what the caller needs</li>
-  <li>Captures messages or appointment requests</li>
-  <li>Logs everything in a simple dashboard</li>
-</ul>
-
-<h2>How it works</h2>
-
-<ol>
-  <li>A customer calls your business</li>
-  <li>BizBot answers and takes the message</li>
-  <li>You follow up when it suits you</li>
-</ol>
-
-<h2>What BizBot handles</h2>
-
-<ul>
-  <li>Missed calls</li>
-  <li>Appointment requests</li>
-  <li>Customer messages</li>
-  <li>After-hours calls</li>
-  <li>Call logs & summaries</li>
-</ul>
-
-<p>
-If BizBot isn’t sure, it takes a message instead of guessing.
-</p>
-
-<h2>Who this is for</h2>
-
-<p>
-Caltora is built for service businesses:
-</p>
-
-<ul>
-  <li>Clinics & medical practices</li>
-  <li>Salons & barbers</li>
-  <li>Repair shops</li>
-  <li>Consultants & solo professionals</li>
-</ul>
-
-<h2>Pricing (early access)</h2>
-
-<div class="box">
-  <p class="price">$99 setup + $29/month</p>
-  <ul>
-    <li>AI receptionist setup</li>
-    <li>24/7 call answering</li>
-    <li>Message & appointment capture</li>
-    <li>Dashboard access</li>
-    <li>Ongoing support</li>
-  </ul>
-</div>
-
-<h2>Get early access</h2>
-
-<p>
-We’re onboarding a limited number of early businesses.
-</p>
-
-<a class="cta" href="mailto:your@email.com?subject=Caltora%20Setup%20Request">
-Request setup
-</a>
-
-<footer>
-  © Caltora. All rights reserved.
-</footer>
-
-</body>
-</html>
-"""
