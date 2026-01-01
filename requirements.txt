@@ -4,3 +4,4 @@ Werkzeug
 twilio
 openai
 gunicorn
+sendgrid==6.11.0
