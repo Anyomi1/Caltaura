@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · CALTAURA{% endblock %}
+
+{% block content %}
+{% set s = stats if stats is defined else None %}
+{% set new_leads = (s.new_leads if s and s.new_leads is defined else (new_leads_count if new_leads_count is defined else 0)) %}
+{% set calls_today = (s.calls_today if s and s.calls_today is defined else (calls_today if calls_today is defined else 0)) %}
+{% set qualified = (s.qualified if s and s.qualified is defined else (qualified_count if qualified_count is defined else 0)) %}
+{% set conversions = (s.conversions if s and s.conversions is defined else (conversions if conversions is defined else 0)) %}
+
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3">
+  <div>
+    <h1 class="h4 mb-1">Operations Dashboard</h1>
+    <div class="text-muted">
+      Lead intake, call capture, and readiness signals for your CALTAURA workflow.
+    </div>
+  </div>
+
+  <div class="d-flex gap-2 flex-wrap">
+    <a class="btn btn-outline-light" href="{{ url_for('kb') }}">Knowledge Base</a>
+    <a class="btn btn-outline-light" href="{{ url_for('playbooks') }}">Playbooks</a>
+    <a class="btn btn-primary" href="{{ url_for('leads') }}">Leads</a>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="text-muted small">New leads</div>
+        <div class="display-6">{{ new_leads }}</div>
+        <div class="text-muted small">Awaiting first follow-up</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="text-muted small">Calls today</div>
+        <div class="display-6">{{ calls_today }}</div>
+        <div class="text-muted small">Inbound activity</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="text-muted small">Qualified</div>
+        <div class="display-6">{{ qualified }}</div>
+        <div class="text-muted small">Ready to close / book</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="text-muted small">Conversions</div>
+        <div class="display-6">{{ conversions }}</div>
+        <div class="text-muted small">Won / booked</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <!-- Left column -->
+  <div class="col-lg-7">
+    <div class="card shadow-sm mb-3">
+      <div class="card-body p-4">
+        <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+          <div>
+            <h2 class="h6 mb-1">System readiness</h2>
+            <div class="text-muted small">Minimum checklist to ensure inbound capture and routing actually works.</div>
+          </div>
+          <span class="pill">MVP critical path</span>
+        </div>
+
+        <hr class="my-4" style="border-color: rgba(255,255,255,.10);">
+
+        <div class="d-grid gap-2">
+          <div class="card">
+            <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div>
+                <div class="fw-semibold">1) Configure Twilio credentials</div>
+                <div class="text-muted small">Account SID, Auth Token, and the CALTAURA number saved in Settings/Onboarding.</div>
+              </div>
+              <a class="btn btn-sm btn-outline-light" href="{{ url_for('settings') }}">Open settings</a>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div>
+                <div class="fw-semibold">2) Verify inbound webhook hits your server</div>
+                <div class="text-muted small">Twilio Voice webhook should reach your public URL endpoint (Render/domain).</div>
+              </div>
+              <a class="btn btn-sm btn-outline-light" href="{{ url_for('settings') }}">Webhook target</a>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div>
+                <div class="fw-semibold">3) Add Knowledge Base facts</div>
+                <div class="text-muted small">Hours, pricing guidance, service areas, disqualifiers, FAQs.</div>
+              </div>
+              <a class="btn btn-sm btn-outline-light" href="{{ url_for('kb') }}">Edit KB</a>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div>
+                <div class="fw-semibold">4) Define playbooks</div>
+                <div class="text-muted small">Deterministic scripts for intake, objections, and booking steps.</div>
+              </div>
+              <a class="btn btn-sm btn-outline-light" href="{{ url_for('playbooks') }}">Open playbooks</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent Leads -->
+    <div class="card shadow-sm">
+      <div class="card-body p-4">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <div>
+            <h2 class="h6 mb-1">Recent leads</h2>
+            <div class="text-muted small">Latest captured prospects. Follow up fast to maximize conversion rate.</div>
+          </div>
+          <a class="btn btn-sm btn-primary" href="{{ url_for('leads') }}">View all</a>
+        </div>
+
+        <hr class="my-4" style="border-color: rgba(255,255,255,.10);">
+
+        {% set recent = recent_leads if recent_leads is defined else (leads if leads is defined else []) %}
+        {% if recent|length == 0 %}
+          <div class="text-muted">No leads yet. Once Twilio webhooks are wired, inbound calls should populate this automatically.</div>
+        {% else %}
+          <div class="table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+              <thead>
+                <tr>
+                  <th>Lead</th>
+                  <th>Status</th>
+                  <th>Source</th>
+                  <th class="text-end">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for lead in recent[:8] %}
+                  {% set status = (lead.status if lead.status is defined else 'new') %}
+                  {% set badge = 'secondary' %}
+                  {% if status == 'new' %}{% set badge = 'info' %}{% endif %}
+                  {% if status == 'contacted' %}{% set badge = 'warning' %}{% endif %}
+                  {% if status == 'qualified' %}{% set badge = 'primary' %}{% endif %}
+                  {% if status == 'won' %}{% set badge = 'success' %}{% endif %}
+                  {% if status == 'lost' %}{% set badge = 'danger' %}{% endif %}
+
+                  <tr>
+                    <td>
+                      <div class="fw-semibold">{{ lead.name if lead.name is defined else ('Lead #' ~ lead.id) }}</div>
+                      <div class="text-muted small">
+                        {% if lead.phone is defined and lead.phone %}{{ lead.phone }}{% endif %}
+                        {% if lead.email is defined and lead.email %}
+                          {% if lead.phone is defined and lead.phone %} · {% endif %}
+                          {{ lead.email }}
+                        {% endif %}
+                      </div>
+                    </td>
+                    <td><span class="badge text-bg-{{ badge }}">{{ status|capitalize }}</span></td>
+                    <td class="text-muted small">{{ lead.source if lead.source is defined else 'unknown' }}</td>
+                    <td class="text-end">
+                      <a class="btn btn-sm btn-outline-light" href="{{ url_for('lead_detail', lead_id=lead.id) }}">Open</a>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Right column -->
+  <div class="col-lg-5">
+    <div class="card shadow-sm mb-3">
+      <div class="card-body p-4">
+        <h2 class="h6 mb-1">Today’s focus</h2>
+        <div class="text-muted small mb-3">A tight execution set that moves the product toward beta readiness.</div>
+
+        <div class="d-grid gap-2">
+          <div class="card">
+            <div class="card-body">
+              <div class="fw-semibold">Follow up on all “New” leads</div>
+              <div class="text-muted small">Convert quickly: confirm need, budget, timeline, and next action.</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-body">
+              <div class="fw-semibold">Validate call logging + recordings</div>
+              <div class="text-muted small">Ensure each call produces a log entry and an associated lead (where applicable).</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-body">
+              <div class="fw-semibold">Strengthen KB disqualifiers</div>
+              <div class="text-muted small">Prevent wasted cycles: what you do NOT do matters as much as what you do.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm">
+      <div class="card-body p-4">
+        <h2 class="h6 mb-1">Quick links</h2>
+        <div class="text-muted small mb-3">Admin shortcuts.</div>
+
+        <div class="d-grid gap-2">
+          <a class="btn btn-outline-light" href="{{ url_for('onboarding') }}">Run onboarding</a>
+          <a class="btn btn-outline-light" href="{{ url_for('settings') }}">Settings</a>
+          <a class="btn btn-outline-light" href="{{ url_for('kb') }}">Knowledge Base</a>
+          <a class="btn btn-outline-light" href="{{ url_for('playbooks') }}">Playbooks</a>
+          <a class="btn btn-outline-light" href="{{ url_for('leads') }}">Leads</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

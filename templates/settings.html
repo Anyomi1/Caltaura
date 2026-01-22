@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Settings · CALTAURA{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+  <div>
+    <h1 class="h4 mb-1">Settings</h1>
+    <div class="text-muted">System configuration for intake, notifications, and Twilio integration.</div>
+  </div>
+  <a class="btn btn-outline-light" href="{{ url_for('onboarding') }}">Run onboarding</a>
+</div>
+
+<div class="card">
+  <div class="card-body p-4">
+    <form method="post" action="{{ url_for('settings') }}">
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label">Public base URL</label>
+          <input class="form-control" name="public_base_url" placeholder="https://your-app.onrender.com"
+                 value="{{ settings.public_base_url if settings is defined and settings.public_base_url is defined else '' }}">
+          <div class="form-text text-muted">Twilio webhooks must point to a publicly reachable URL in production.</div>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Notification email</label>
+          <input class="form-control" name="notify_email" placeholder="alerts@company.com"
+                 value="{{ settings.notify_email if settings is defined and settings.notify_email is defined else '' }}">
+        </div>
+
+        <div class="col-12">
+          <hr class="my-2" style="border-color: rgba(255,255,255,.10);">
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label">Twilio Account SID</label>
+          <input class="form-control" name="twilio_account_sid"
+                 value="{{ settings.twilio_account_sid if settings is defined and settings.twilio_account_sid is defined else '' }}">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Twilio Auth Token</label>
+          <input class="form-control" name="twilio_auth_token"
+                 value="{{ settings.twilio_auth_token if settings is defined and settings.twilio_auth_token is defined else '' }}">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Twilio Number</label>
+          <input class="form-control" name="twilio_number" placeholder="+1XXXXXXXXXX"
+                 value="{{ settings.twilio_number if settings is defined and settings.twilio_number is defined else '' }}">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Record calls</label>
+          {% set rc = settings.record_calls if settings is defined and settings.record_calls is defined else 'auto' %}
+          <select class="form-select" name="record_calls">
+            <option value="auto" {% if rc=='auto' %}selected{% endif %}>Auto</option>
+            <option value="on" {% if rc=='on' %}selected{% endif %}>On</option>
+            <option value="off" {% if rc=='off' %}selected{% endif %}>Off</option>
+          </select>
+        </div>
+
+        <div class="col-12 mt-2">
+          <div class="card">
+            <div class="card-body">
+              <div class="fw-semibold mb-1">Twilio webhook targets</div>
+              <div class="text-muted small">
+                Once deployed, configure Twilio Voice webhook to:
+                <code>/voice</code> (or your inbound endpoint). Ensure status callbacks/logging are enabled if you built them.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="d-flex justify-content-end gap-2 mt-4">
+        <button class="btn btn-primary" type="submit">Save settings</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

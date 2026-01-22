@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Register · CALTAURA{% endblock %}
+{% block content %}
+  <div class="card">
+    <h1>Create your account</h1>
+    <p>Start with a username + password. You’ll configure your business details after login.</p>
+
+    {% if error %}
+      <div class="err">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST" action="/register">
+      <label>Username</label>
+      <input name="username" placeholder="e.g., arham" required />
+
+      <label>Password</label>
+      <input type="password" name="password" placeholder="Create a strong password" required />
+
+      <div class="row" style="margin-top:14px;">
+        <button class="btn" type="submit">Create account</button>
+        <a class="btn secondary" href="/login">I already have an account</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Playbooks · CALTAURA{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+  <div>
+    <h1 class="h4 mb-1">Playbooks</h1>
+    <div class="text-muted">Standard operating scripts for intake, objections, qualification, and booking.</div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="card">
+      <div class="card-body p-4">
+        <h2 class="h6 mb-1">Create / update playbook</h2>
+        <div class="text-muted small mb-3">Keep it concise. A playbook should be deterministic and repeatable.</div>
+
+        <form method="post" action="{{ url_for('playbooks') }}">
+          <div class="mb-3">
+            <label class="form-label">Name</label>
+            <input class="form-control" name="name" placeholder="Inbound Intake (General)" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Goal</label>
+            <input class="form-control" name="goal" placeholder="Capture lead, qualify, and book appointment">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Script / steps</label>
+            <textarea class="form-control" rows="10" name="content" placeholder="1) Greeting...&#10;2) Identify need...&#10;3) Collect contact...&#10;4) Next step..."></textarea>
+          </div>
+          <button class="btn btn-primary w-100" type="submit">Save playbook</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-7">
+    <div class="card">
+      <div class="card-body p-4">
+        <h2 class="h6 mb-1">Existing playbooks</h2>
+        <div class="text-muted small mb-3">These can be referenced by your voice agent or chat workflows.</div>
+
+        {% set items = playbooks if playbooks is defined else [] %}
+        {% if items|length == 0 %}
+          <div class="text-muted">No playbooks yet.</div>
+        {% else %}
+          <div class="accordion" id="pb">
+            {% for p in items %}
+              <div class="accordion-item" style="background: rgba(255,255,255,.03); border-color: rgba(255,255,255,.08);">
+                <h2 class="accordion-header">
+                  <button class="accordion-button collapsed text-light" type="button" data-bs-toggle="collapse" data-bs-target="#pb{{ loop.index }}"
+                          style="background: rgba(255,255,255,.03);">
+                    {{ p.name if p.name is defined else ('Playbook ' ~ loop.index) }}
+                  </button>
+                </h2>
+                <div id="pb{{ loop.index }}" class="accordion-collapse collapse" data-bs-parent="#pb">
+                  <div class="accordion-body">
+                    <div class="text-muted small mb-2">{{ p.goal if p.goal is defined else '' }}</div>
+                    <pre class="mb-0" style="white-space: pre-wrap; color: rgba(255,255,255,.9);">{{ p.content if p.content is defined else '' }}</pre>
+                  </div>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

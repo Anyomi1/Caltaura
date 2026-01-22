@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Onboarding · CALTAURA{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-9">
+    <div class="card shadow-sm">
+      <div class="card-body p-4">
+        <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+          <div>
+            <h1 class="h4 mb-1">Onboarding</h1>
+            <p class="text-muted mb-0">Set your business profile and connect Twilio so calls can be captured and logged.</p>
+          </div>
+          <span class="pill">~5 minutes</span>
+        </div>
+
+        <hr class="my-4" style="border-color: rgba(255,255,255,.10);">
+
+        <form method="post" action="{{ url_for('onboarding') }}">
+          <h2 class="h6 mb-3">Business profile</h2>
+          <div class="row g-3 mb-4">
+            <div class="col-md-6">
+              <label class="form-label">Business name</label>
+              <input class="form-control" name="business_name" value="{{ business.business_name if business is defined and business.business_name is defined else '' }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Industry</label>
+              <input class="form-control" name="industry" placeholder="Dental, HVAC, Real Estate..." value="{{ business.industry if business is defined and business.industry is defined else '' }}">
+            </div>
+            <div class="col-12">
+              <label class="form-label">Primary service area</label>
+              <input class="form-control" name="service_area" placeholder="Riyadh / Remote / Nationwide" value="{{ business.service_area if business is defined and business.service_area is defined else '' }}">
+            </div>
+          </div>
+
+          <h2 class="h6 mb-3">Twilio connection</h2>
+          <div class="row g-3 mb-4">
+            <div class="col-md-6">
+              <label class="form-label">Twilio Account SID</label>
+              <input class="form-control" name="twilio_account_sid" placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                     value="{{ business.twilio_account_sid if business is defined and business.twilio_account_sid is defined else '' }}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Twilio Auth Token</label>
+              <input class="form-control" name="twilio_auth_token" placeholder="••••••••••••••••••••••••••••"
+                     value="{{ business.twilio_auth_token if business is defined and business.twilio_auth_token is defined else '' }}">
+              <div class="form-text text-muted">Store securely (env vars in production). This form is acceptable for MVP if DB is protected.</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Twilio Phone Number</label>
+              <input class="form-control" name="twilio_number" placeholder="+1XXXXXXXXXX"
+                     value="{{ business.twilio_number if business is defined and business.twilio_number is defined else '' }}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Recording preference</label>
+              <select class="form-select" name="record_calls">
+                {% set rc = business.record_calls if business is defined and business.record_calls is defined else 'auto' %}
+                <option value="auto" {% if rc == 'auto' %}selected{% endif %}>Auto (recommended)</option>
+                <option value="on" {% if rc == 'on' %}selected{% endif %}>Always record</option>
+                <option value="off" {% if rc == 'off' %}selected{% endif %}>Never record</option>
+              </select>
+            </div>
+          </div>
+
+          <h2 class="h6 mb-3">Lead capture defaults</h2>
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label">Default lead status</label>
+              <select class="form-select" name="default_lead_status">
+                {% set ds = business.default_lead_status if business is defined and business.default_lead_status is defined else 'new' %}
+                <option value="new" {% if ds == 'new' %}selected{% endif %}>New</option>
+                <option value="contacted" {% if ds == 'contacted' %}selected{% endif %}>Contacted</option>
+                <option value="qualified" {% if ds == 'qualified' %}selected{% endif %}>Qualified</option>
+              </select>
+            </div>
+            <div class="col-md-8">
+              <label class="form-label">Notification email (optional)</label>
+              <input class="form-control" name="notify_email" placeholder="alerts@company.com"
+                     value="{{ business.notify_email if business is defined and business.notify_email is defined else '' }}">
+            </div>
+          </div>
+
+          <div class="d-flex justify-content-end gap-2 mt-4">
+            <a class="btn btn-outline-light" href="{{ url_for('dashboard') }}">Skip for now</a>
+            <button class="btn btn-primary" type="submit">Save onboarding</button>
+          </div>
+        </form>
+
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

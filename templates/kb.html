@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Knowledge Base · CALTAURA{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+  <div>
+    <h1 class="h4 mb-1">Knowledge Base</h1>
+    <div class="text-muted">What your agent uses to answer questions and qualify leads.</div>
+  </div>
+  <span class="pill">Keep it tight and factual</span>
+</div>
+
+<div class="card">
+  <div class="card-body p-4">
+    <form method="post" action="{{ url_for('kb') }}">
+      <div class="mb-3">
+        <label class="form-label">Business overview</label>
+        <textarea class="form-control" rows="4" name="overview" placeholder="What do you do? Who do you serve? What makes you different?">{{ kb.overview if kb is defined and kb.overview is defined else '' }}</textarea>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label">Hours / availability</label>
+        <textarea class="form-control" rows="2" name="hours" placeholder="Mon–Fri 9am–6pm, Sat 10am–2pm, closed Sunday">{{ kb.hours if kb is defined and kb.hours is defined else '' }}</textarea>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label">Pricing guidance</label>
+        <textarea class="form-control" rows="3" name="pricing" placeholder="Provide ranges and how quotes work. Avoid overpromising.">{{ kb.pricing if kb is defined and kb.pricing is defined else '' }}</textarea>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label">FAQs</label>
+        <textarea class="form-control" rows="8" name="faqs" placeholder="Q: ...&#10;A: ...">{{ kb.faqs if kb is defined and kb.faqs is defined else '' }}</textarea>
+        <div class="form-text text-muted">Use a consistent Q/A format. It improves retrieval and response quality.</div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label">Disqualifiers / constraints</label>
+        <textarea class="form-control" rows="4" name="disqualifiers" placeholder="We do not serve... We cannot... We require...">{{ kb.disqualifiers if kb is defined and kb.disqualifiers is defined else '' }}</textarea>
+      </div>
+
+      <div class="d-flex justify-content-end gap-2">
+        <button class="btn btn-primary" type="submit">Save KB</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

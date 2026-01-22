@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Login · CALTAURA{% endblock %}
+{% block content %}
+  <div class="card">
+    <h1>Login</h1>
+    <p>Enter your username and password.</p>
+
+    {% if error %}
+      <div class="err">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST" action="/login">
+      <input type="hidden" name="next" value="{{ next or '' }}"/>
+
+      <label>Username</label>
+      <input name="username" required />
+
+      <label>Password</label>
+      <input type="password" name="password" required />
+
+      <div class="row" style="margin-top:14px;">
+        <button class="btn" type="submit">Login</button>
+        <a class="btn secondary" href="/register">Create account</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

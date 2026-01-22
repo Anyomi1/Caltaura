@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{% block title %}CALTAURA{% endblock %}</title>
+  <style>
+    :root { --bg:#0b1220; --card:#111b2e; --text:#e9eefc; --muted:#9fb0d0; --line:#1f2b44; --btn:#2a5bd7; --btn2:#1a2a46; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--text); }
+    a { color:inherit; text-decoration:none; }
+    .wrap { max-width:980px; margin:0 auto; padding:18px; }
+    .nav { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 0; border-bottom:1px solid var(--line); margin-bottom:18px; }
+    .brand { font-weight:800; letter-spacing:0.4px; }
+    .navlinks { display:flex; gap:10px; flex-wrap:wrap; }
+    .pill { border:1px solid var(--line); padding:8px 12px; border-radius:999px; background:rgba(255,255,255,0.03); }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:18px; }
+    .grid { display:grid; gap:14px; }
+    .grid2 { grid-template-columns:1fr 1fr; }
+    @media (max-width:800px){ .grid2{ grid-template-columns:1fr; } }
+    h1 { margin:0 0 10px; font-size:26px; }
+    p { margin:0 0 10px; color:var(--muted); line-height:1.45; }
+    label { display:block; font-size:13px; color:var(--muted); margin:10px 0 6px; }
+    input, textarea, select {
+      width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--line);
+      background:#0d1730; color:var(--text); outline:none;
+    }
+    input:focus, textarea:focus, select:focus { border-color:#3a6cff; }
+    .row { display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .btn {
+      display:inline-block; padding:10px 14px; border-radius:12px; border:1px solid var(--line);
+      background:var(--btn); color:white; font-weight:700; cursor:pointer;
+    }
+    .btn.secondary { background:var(--btn2); }
+    .err { background:rgba(255,70,70,0.12); border:1px solid rgba(255,70,70,0.35); padding:10px 12px; border-radius:12px; color:#ffd2d2; margin-bottom:12px; }
+    .foot { margin-top:14px; font-size:12px; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="nav">
+      <div class="brand">CALTAURA</div>
+      <div class="navlinks">
+        <a class="pill" href="/">Home</a>
+        {% if current_user.is_authenticated %}
+          <a class="pill" href="/dashboard">Dashboard</a>
+          <a class="pill" href="/leads">Leads</a>
+          <a class="pill" href="/kb">KB</a>
+          <a class="pill" href="/settings">Settings</a>
+          <a class="pill" href="/logout">Logout</a>
+        {% else %}
+          <a class="pill" href="/login">Login</a>
+          <a class="pill" href="/register">Register</a>
+        {% endif %}
+      </div>
+    </div>
+
+    {% block content %}{% endblock %}
+
+    <div class="foot">
+      © {{ (utc_now_iso()[:4] if utc_now_iso is defined else "2026") }} CALTAURA
+    </div>
+  </div>
+</body>
+</html>
